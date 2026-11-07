@@ -386,8 +386,8 @@
       <div class="statusmsg" id="dataStatus"></div>
     </div>
     <div class="setcard">
-      <h3>Scanning notes</h3>
-      <p class="note" style="margin-top:0;">Barcodes look up Open Food Facts, a free food database that covers most US packaged foods. Anything it cannot find, add once as a custom food and it stays in My Foods for next time. Fresh foods without barcodes are fastest from search or your staples.</p>
+      <h3>Food databases</h3>
+      <p class="note" style="margin-top:0;">Search covers two online databases: USDA FoodData Central for generic foods like chicken breast, rice, eggs, and produce, and Open Food Facts for packaged and branded foods. Barcodes look up Open Food Facts, which covers most US packaged foods. Anything neither database can find, add once as a custom food and it stays in My Foods for next time.</p>
     </div>
   </section>
 </div>
@@ -421,8 +421,8 @@
       </div>
 
       <div class="pane active" id="pane-search">
-        <input type="search" id="searchInput" placeholder="Try: greek yogurt, salmon, rice..." autocomplete="off" />
-        <div class="statusmsg" id="searchStatus">Your staples and recent foods are below. Keep typing to search thousands more foods online.</div>
+        <input type="search" id="searchInput" placeholder="Try: greek yogurt, salmon, rice, apple..." autocomplete="off" />
+        <div class="statusmsg" id="searchStatus">Your staples and recent foods are below. Keep typing to search USDA for generic foods and Open Food Facts for packaged foods.</div>
         <div id="searchResults"></div>
       </div>
 
@@ -1003,7 +1003,7 @@ function mealLabel(key){
   return key;
 }
 
-/* ---------- Search (local first, Open Food Facts online) ---------- */
+/* ---------- Search (local first, USDA generic + Open Food Facts packaged) ---------- */
 var searchSeq = 0;
 function renderSearch(q){
   q = (q || "").toLowerCase().trim();
@@ -1032,46 +1032,100 @@ function renderSearch(q){
     host.appendChild(sectionLabelEl("Your foods"));
   }
   shown.forEach(function(f){ host.appendChild(foodRowEl(f, "search")); });
-  if(q && !local.length) host.appendChild(noteEl("Not in your foods. Searching online below."));
+  if(q && !local.length) host.appendChild(noteEl("Not in your foods. Searching USDA and packaged foods below."));
   var onlineHost = document.createElement("div");
   onlineHost.id = "onlineResults";
+  var usdaHost = document.createElement("div");
+  usdaHost.id = "usdaResults";
+  var offHost = document.createElement("div");
+  offHost.id = "offResults";
+  onlineHost.appendChild(usdaHost);
+  onlineHost.appendChild(offHost);
   host.appendChild(onlineHost);
   bindFoodRows(host, "search");
-  status.textContent = q ? "" : "Your staples and recent foods are below. Keep typing to search thousands more foods online.";
+  status.textContent = q ? "" : "Your staples and recent foods are below. Keep typing to search USDA for generic foods and Open Food Facts for packaged foods.";
   status.className = "statusmsg";
 
   if(q.length >= 3){
     var seq = ++searchSeq;
-    status.textContent = "Searching online foods...";
+    status.textContent = "Searching USDA and packaged foods...";
+    var pendingCount = 2;
+    var anyFail = false;
+    var anyResult = false;
+    function doneOne(failed, hadResult){
+      if(seq !== searchSeq) return;
+      if(failed) anyFail = true;
+      if(hadResult) anyResult = true;
+      pendingCount--;
+      if(pendingCount > 0) return;
+      if(anyFail && !anyResult){
+        status.textContent = "Online search is unavailable right now. Your saved foods still work.";
+        status.className = "statusmsg err";
+      } else {
+        status.textContent = "";
+        status.className = "statusmsg";
+        var uh2 = document.getElementById("usdaResults");
+        var oh2 = document.getElementById("offResults");
+        var usdaEmpty = !uh2 || !uh2.children.length;
+        var offEmpty = !oh2 || !oh2.children.length;
+        if(usdaEmpty && offEmpty && oh2){
+          oh2.appendChild(sectionLabelEl("Online"));
+          oh2.appendChild(noteEl("No online matches in USDA or packaged foods. Add it as a custom food so it is here next time."));
+        }
+      }
+    }
+    /* USDA FoodData Central: best for generic foods (produce, plain proteins, grains).
+       Uses the public DEMO_KEY, nutrients are per 100 g for Foundation / SR Legacy. */
+    fetch("https://api.nal.usda.gov/fdc/v1/foods/search?api_key=DEMO_KEY&query=" + encodeURIComponent(q) +
+      "&pageSize=8&dataType=Foundation,SR%20Legacy",
+      {headers:{"Accept":"application/json"}})
+    .then(function(r){
+      if(!r.ok) throw new Error("usda " + r.status);
+      return r.json();
+    })
+    .then(function(data){
+      if(seq !== searchSeq) return;
+      var uh = document.getElementById("usdaResults");
+      if(!uh){ doneOne(false, false); return; }
+      var items = (data.foods || []).filter(function(f){ return f.description && f.foodNutrients && f.foodNutrients.length; });
+      var foods = items.map(usdaToFood).filter(function(f){ return f.cal > 0 || f.protein > 0 || f.carbs > 0; });
+      /* De-dupe against foods already saved locally by name */
+      var localNames = {};
+      allFoods().forEach(function(f){ localNames[f.name.toLowerCase()] = true; });
+      foods = foods.filter(function(f){ return !localNames[f.name.toLowerCase()]; });
+      uh.innerHTML = "";
+      if(foods.length){
+        uh.appendChild(sectionLabelEl("USDA · Generic foods"));
+        foods.forEach(function(f){ usdaCache[foodKey(f)] = f; uh.appendChild(foodRowEl(f, "search")); });
+        bindFoodRows(uh, "search");
+      }
+      doneOne(false, foods.length > 0);
+    })
+    .catch(function(){ doneOne(true, false); });
+    /* Open Food Facts: best for packaged and branded foods */
     fetch("https://world.openfoodfacts.org/cgi/search.pl?search_terms=" + encodeURIComponent(q) +
       "&search_simple=1&action=process&json=1&page_size=10&fields=code,product_name,brands,nutriments,serving_size,nutrition_data_per",
       {headers:{"Accept":"application/json"}})
     .then(function(r){ return r.json(); })
     .then(function(data){
       if(seq !== searchSeq) return;
-      status.textContent = "";
-      var oh = document.getElementById("onlineResults");
-      if(!oh) return;
+      var oh = document.getElementById("offResults");
+      if(!oh){ doneOne(false, false); return; }
       var prods = (data.products || []).filter(function(p){ return p.product_name && p.nutriments; });
       oh.innerHTML = "";
-      if(!prods.length){
-        oh.appendChild(sectionLabelEl("Online"));
-        oh.appendChild(noteEl("No online matches. Add it as a custom food so it is here next time."));
-        return;
+      if(prods.length){
+        var foods2 = prods.map(offToFood);
+        oh.appendChild(sectionLabelEl("Packaged foods · Open Food Facts"));
+        foods2.forEach(function(f){ onlineCache[foodKey(f)] = f; oh.appendChild(foodRowEl(f, "search")); });
+        bindFoodRows(oh, "search");
       }
-      var foods = prods.map(offToFood);
-      oh.appendChild(sectionLabelEl("Online results"));
-      foods.forEach(function(f){ onlineCache[foodKey(f)] = f; oh.appendChild(foodRowEl(f, "search")); });
-      bindFoodRows(oh, "search");
+      doneOne(false, prods.length > 0);
     })
-    .catch(function(){
-      if(seq !== searchSeq) return;
-      status.textContent = "Online search is unavailable right now. Your saved foods still work.";
-      status.className = "statusmsg err";
-    });
+    .catch(function(){ doneOne(true, false); });
   } else { searchSeq++; }
 }
 var onlineCache = {};
+var usdaCache = {};
 var searchDebounce = null;
 document.getElementById("searchInput").addEventListener("input", function(){
   clearTimeout(searchDebounce);
@@ -1125,13 +1179,56 @@ function offToFood(p){
     barcode: String(p.code || "").replace(/\D/g, ""), tags: []
   };
 }
+function usdaNutrient(foodNutrients){
+  var out = {cal:0, protein:0, fiber:0, carbs:0, fat:0};
+  var calFallback = 0;
+  (foodNutrients || []).forEach(function(n){
+    var id = n.nutrientId || (n.nutrient && n.nutrient.id) || 0;
+    var name = String(n.nutrientName || (n.nutrient && n.nutrient.name) || "").toLowerCase();
+    var unit = String(n.unitName || (n.nutrient && n.nutrient.unitName) || "").toUpperCase();
+    var val = typeof n.value === "number" ? n.value : (typeof n.amount === "number" ? n.amount : 0);
+    if(id === 1008) out.cal = val;
+    else if((id === 2047 || id === 2048 || name.indexOf("energy") === 0) && unit === "KCAL" && !calFallback) calFallback = val;
+    else if(id === 1003 || name === "protein") out.protein = val;
+    else if(id === 1079 || name.indexOf("fiber") >= 0) out.fiber = val;
+    else if(id === 1005 || name.indexOf("carbohydrate") >= 0) out.carbs = val;
+    else if(id === 1004 || name.indexOf("total lipid") >= 0) out.fat = val;
+  });
+  if(!out.cal && calFallback) out.cal = calFallback;
+  return {
+    cal: Math.round(out.cal || 0),
+    protein: Math.round((out.protein || 0)*10)/10,
+    fiber: Math.round((out.fiber || 0)*10)/10,
+    carbs: Math.round((out.carbs || 0)*10)/10,
+    fat: Math.round((out.fat || 0)*10)/10
+  };
+}
+function usdaToFood(f){
+  var nut = usdaNutrient(f.foodNutrients || []);
+  var desc = cleanRemoteStr(f.description) || "Unnamed food";
+  /* USDA SR Legacy names can be ALL CAPS or very long; soften all-caps for readability */
+  if(desc === desc.toUpperCase() && desc.length > 3){
+    desc = desc.charAt(0) + desc.slice(1).toLowerCase();
+  }
+  var dataType = cleanRemoteStr(f.dataType || "");
+  var brand = "USDA FoodData Central" + (dataType ? " \u00b7 " + dataType : "");
+  if(f.brandOwner) brand = cleanRemoteStr(f.brandOwner) + " \u00b7 USDA";
+  return {
+    id: "usda:" + String(f.fdcId || ""),
+    name: desc,
+    brand: brand,
+    serving: "100 g",
+    cal: nut.cal, protein: nut.protein, fiber: nut.fiber, carbs: nut.carbs, fat: nut.fat,
+    barcode: "", tags: []
+  };
+}
 
-/* findFoodByKey extended for online cache */
+/* findFoodByKey extended for online caches (Open Food Facts + USDA) */
 var origFind = findFoodByKey;
 findFoodByKey = function(key){
   var f = origFind(key);
   if(f) return f;
-  return onlineCache[key] || barcodeCache[key] || null;
+  return onlineCache[key] || barcodeCache[key] || usdaCache[key] || null;
 };
 var barcodeCache = {};
 
@@ -1317,8 +1414,8 @@ document.getElementById("confirmAdd").addEventListener("click", function(){
     /* Track recents */
     var key = foodKey(pendingFood);
     state.recentKeys = [key].concat(state.recentKeys.filter(function(k){ return k !== key; })).slice(0, 10);
-    /* If this was an online food, keep it findable via recents by saving a copy as custom */
-    if(pendingFood.id && pendingFood.id.indexOf("off:") === 0 && !findFoodByKeySaved(key)){
+    /* If this was an online food (USDA or Open Food Facts), keep it findable via recents by saving a copy as custom */
+    if(pendingFood.id && (pendingFood.id.indexOf("off:") === 0 || pendingFood.id.indexOf("usda:") === 0) && !findFoodByKeySaved(key)){
       var copy = JSON.parse(JSON.stringify(pendingFood));
       copy.custom = true; copy.fromScan = true;
       state.customFoods.push(copy);
